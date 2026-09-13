@@ -1,243 +1,438 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
+  ActivityIndicator,
+  TouchableOpacity,
+  StatusBar,
 } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import Svg, { Circle } from 'react-native-svg';
 
-import Header from '../components/Header';
-import StatusBadge from '../components/StatusBadge';
-import CircularTimer from '../components/CircularTimer';
-import PrimaryButton from '../components/PrimaryButton';
+import GradientHeader from '../components/ui/GradientHeader';
+import { useDialog } from '../components/ui/DialogProvider';
+import { ActionBar, ActionButton, Card, GhostButton, Icon } from '../components/ui';
+import { colors } from '../theme/colors';
+import { radius, sizes, spacing } from '../theme/spacing';
+import { typography } from '../theme/typography';
 import { RootStackParamList } from '../navigation/types';
+import { addLocations, cancelTask, endTask, getTask } from '../api/tasks';
+import type { LocationBatchItem, Task } from '../api/types';
+import { getCurrentFix, watchPosition } from '../services/location';
+import {
+  formatClock,
+  formatDistance,
+  formatElapsed,
+  secondsSince,
+} from '../utils/format';
 
-interface TaskData {
-  employeeName: string;
-  designation: string;
-  avatar?: string;
-  status: string;
-  gpsStatus: string;
-  elapsedTime: string;
-  taskTitle: string;
-  trackingMessage: string;
-  progress: number;
-}
+const walkIcon = require('../assets/icons/walk.png');
 
-type ActiveTaskScreenNavigationProp = NativeStackNavigationProp<
-  RootStackParamList,
-  'ActiveTask'
->;
+type Nav = NativeStackNavigationProp<RootStackParamList, 'ActiveTask'>;
+type Route = RouteProp<RootStackParamList, 'ActiveTask'>;
+
+const FLUSH_INTERVAL_MS = 30000;
+
+/** Ring geometry, matching the canvas's 214pt outer / 188pt inner. */
+const RING = sizes.ring;
+const STROKE = sizes.ringStroke;
+const RADIUS = (RING - STROKE) / 2;
+const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 
 const ActiveTaskScreen: React.FC = () => {
-  const navigation = useNavigation<ActiveTaskScreenNavigationProp>();
+  const navigation = useNavigation<Nav>();
+  const { params } = useRoute<Route>();
+  const insets = useSafeAreaInsets();
+  const dialog = useDialog();
 
-  const [loading, setLoading] = useState(false);
+  const [task, setTask] = useState<Task | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [elapsed, setElapsed] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [gpsOk, setGpsOk] = useState(false);
+  const [pointsSent, setPointsSent] = useState(0);
 
-  const [taskData, setTaskData] = useState<TaskData>({
-    employeeName: 'Ahmed',
-    designation: 'Office Boy',
-    avatar: '',
-    status: 'ACTIVE',
-    gpsStatus: 'GPS Active',
-    elapsedTime: '00:21:44',
-    taskTitle: 'Deposit cheque at HBL',
-    trackingMessage: 'Location is being tracked',
-    progress: 72,
-  });
+  const buffer = useRef<LocationBatchItem[]>([]);
+  const flushing = useRef(false);
+
+  const flush = useCallback(async () => {
+    if (flushing.current || buffer.current.length === 0) {
+      return;
+    }
+    flushing.current = true;
+    const batch = buffer.current;
+    buffer.current = [];
+
+    try {
+      const result = await addLocations(params.taskId, batch);
+      setPointsSent(previous => previous + result.accepted);
+    } catch {
+      // Put them back — the server upserts on clientId, so a re-send is free.
+      buffer.current = [...batch, ...buffer.current];
+    } finally {
+      flushing.current = false;
+    }
+  }, [params.taskId]);
 
   useEffect(() => {
-    const timer = setInterval(() => {
-      setTaskData(prev => {
-        const [hours, minutes, seconds] = prev.elapsedTime
-          .split(':')
-          .map(Number);
-
-        let h = hours;
-        let m = minutes;
-        let s = seconds + 1;
-
-        if (s >= 60) {
-          s = 0;
-          m++;
+    let cancelled = false;
+    getTask(params.taskId)
+      .then(result => {
+        if (cancelled) {
+          return;
         }
-
-        if (m >= 60) {
-          m = 0;
-          h++;
+        setTask(result);
+        setElapsed(secondsSince(result.startedAt));
+      })
+      .catch(error => {
+        dialog
+          .notify({
+            title: 'Could not load the task',
+            message:
+              error instanceof Error ? error.message : 'Please try again.',
+            dismissLabel: 'Back',
+          })
+          .then(() => navigation.goBack());
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
         }
-
-        return {
-          ...prev,
-          elapsedTime: `${String(h).padStart(2, '0')}:${String(m).padStart(
-            2,
-            '0',
-          )}:${String(s).padStart(2, '0')}`,
-          progress: Math.min(prev.progress + 0.1, 100),
-        };
       });
-    }, 1000);
+    return () => {
+      cancelled = true;
+    };
+  }, [params.taskId, navigation, dialog]);
 
-    return () => clearInterval(timer);
-  }, []);
+  // Derived from the server's startedAt, so backgrounding never drifts it.
+  useEffect(() => {
+    if (!task?.startedAt || task.status !== 'IN_PROGRESS') {
+      return;
+    }
+    const id = setInterval(() => setElapsed(secondsSince(task.startedAt)), 1000);
+    return () => clearInterval(id);
+  }, [task?.startedAt, task?.status]);
 
-  const handleStopTask = () => {
-    setLoading(true);
+  useEffect(() => {
+    if (task?.status !== 'IN_PROGRESS') {
+      return;
+    }
+    const unsubscribe = watchPosition(
+      point => {
+        setGpsOk(true);
+        buffer.current.push(point);
+      },
+      () => setGpsOk(false),
+    );
+    const timer = setInterval(flush, FLUSH_INTERVAL_MS);
+    return () => {
+      unsubscribe();
+      clearInterval(timer);
+    };
+  }, [task?.status, flush]);
 
-    // Replace this later with your backend API call
-    setTimeout(() => {
-      setLoading(false);
-
-      // FIX: navigate() bubbles up to find TaskCompleted in the parent
-      // navigator; replace() does not, which caused the "REPLACE action
-      // not handled by any navigator" error. Also now passing real
-      // task data as params instead of nothing.
-      navigation.navigate('TaskCompleted', {
-        employeeName: taskData.employeeName,
-        taskTitle: taskData.taskTitle,
-        duration: taskData.elapsedTime,
-        // distance/destination are placeholders until your task data
-        // model includes them - swap these for real values from your API.
-        distance: '6.2 km',
-        destination: 'HBL Bank, Satellite Town',
+  const handleEnd = async () => {
+    setBusy(true);
+    try {
+      await flush();
+      const fix = await getCurrentFix();
+      await endTask(params.taskId, fix);
+      navigation.replace('TaskCompleted', { taskId: params.taskId });
+    } catch (error) {
+      dialog.notify({
+        title: 'Could not end the task',
+        message: error instanceof Error ? error.message : 'Please try again.',
       });
-    }, 1500);
+    } finally {
+      setBusy(false);
+    }
   };
 
+  const confirmEnd = async () => {
+    const ok = await dialog.confirm({
+      title: 'End this task?',
+      message: 'Your route and time will be recorded.',
+      confirmLabel: 'End task',
+      cancelLabel: 'Keep going',
+    });
+    if (ok) {
+      handleEnd();
+    }
+  };
+
+  const doCancel = async (reason: string) => {
+    setBusy(true);
+    try {
+      let fix;
+      try {
+        fix = await getCurrentFix(8000);
+      } catch {
+        // Optional on cancel: things go wrong in the field, often without signal.
+        fix = undefined;
+      }
+      await cancelTask(params.taskId, reason, fix);
+      navigation.navigate('Main');
+    } catch (error) {
+      dialog.notify({
+        title: 'Could not cancel',
+        message: error instanceof Error ? error.message : 'Please try again.',
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmCancel = async () => {
+    const ok = await dialog.confirm({
+      title: 'Cancel this task',
+      message: 'It will be recorded as cancelled, not completed.',
+      confirmLabel: 'Cancel task',
+      cancelLabel: 'Never mind',
+      destructive: true,
+    });
+    if (ok) {
+      doCancel('Cancelled from the mobile app.');
+    }
+  };
+
+  if (loading || !task) {
+    return (
+      <View style={styles.centered}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
+
+  const isRunning = task.status === 'IN_PROGRESS';
+  // One full sweep per hour, as the canvas does.
+  const progress = ((elapsed % 3600) / 3600) * CIRCUMFERENCE;
+
   return (
-    <SafeAreaView style={styles.container}>
-      <Header
-        name={taskData.employeeName}
-        designation={taskData.designation}
-        avatar={taskData.avatar}
-        showBack
-        onBackPress={() => navigation.goBack()}
-      />
+    <View style={styles.root}>
+      <StatusBar barStyle="light-content" backgroundColor={colors.gradientFrom} />
 
-      <ScrollView
-        style={styles.scrollView}
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
-      >
-        <View style={styles.card}>
-          <View style={styles.badgesContainer}>
-            <StatusBadge label={taskData.status} type="active" />
-            <StatusBadge label={taskData.gpsStatus} type="gps" />
-          </View>
-
-          <CircularTimer
-            elapsedTime={taskData.elapsedTime}
-            progress={taskData.progress}
-          />
-
-          <View style={styles.detailsContainer}>
-            <Text style={styles.taskTitle}>{taskData.taskTitle}</Text>
-
-            <View style={styles.trackingContainer}>
-              <View style={styles.trackingDot} />
-
-              <Text style={styles.trackingMessage}>
-                {taskData.trackingMessage}
-              </Text>
-            </View>
+      <GradientHeader paddingBottom={20}>
+        <View style={styles.headerRow}>
+          <TouchableOpacity
+            onPress={() => navigation.goBack()}
+            style={styles.backButton}
+            accessibilityLabel="Back"
+          >
+            <View style={styles.chevron} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Task in progress</Text>
+          <View style={styles.gpsPill}>
+            <View
+              style={[
+                styles.gpsDot,
+                { opacity: gpsOk ? 1 : 0.45 },
+              ]}
+            />
+            <Text style={styles.gpsText}>GPS</Text>
           </View>
         </View>
 
-        <View style={styles.bottomPadding} />
+        <View style={styles.destChip}>
+          <Icon source={walkIcon} size={18} color="#ffffff" />
+          <Text style={styles.destText} numberOfLines={1}>
+            {task.destination || 'No destination set'}
+          </Text>
+        </View>
+      </GradientHeader>
+
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.ringWrap}>
+          <Svg width={RING} height={RING}>
+            <Circle
+              cx={RING / 2}
+              cy={RING / 2}
+              r={RADIUS}
+              stroke={colors.ringTrack}
+              strokeWidth={STROKE}
+              fill="none"
+            />
+            <Circle
+              cx={RING / 2}
+              cy={RING / 2}
+              r={RADIUS}
+              stroke={colors.primary}
+              strokeWidth={STROKE}
+              fill="none"
+              strokeDasharray={`${progress} ${CIRCUMFERENCE}`}
+              strokeLinecap="round"
+              transform={`rotate(-90 ${RING / 2} ${RING / 2})`}
+            />
+          </Svg>
+          <View style={styles.ringInner} pointerEvents="none">
+            <Text style={styles.clock}>{formatElapsed(elapsed)}</Text>
+            <Text style={styles.clockCaps}>Elapsed</Text>
+          </View>
+        </View>
+
+        <Card style={styles.detailCard}>
+          <Text style={styles.taskTitle}>{task.title || task.description}</Text>
+
+          <View style={styles.statsRow}>
+            <View style={styles.stat}>
+              <Text style={styles.statValue}>
+                {formatDistance(task.distanceMeters)}
+              </Text>
+              <Text style={styles.statCaps}>Distance</Text>
+            </View>
+            <View style={styles.statDivider} />
+            <View style={[styles.stat, styles.statRight]}>
+              <Text style={styles.statValue}>{formatClock(task.startedAt)}</Text>
+              <Text style={styles.statCaps}>Started</Text>
+            </View>
+          </View>
+
+          <Text style={styles.trackingNote}>
+            {gpsOk
+              ? `Location tracked · ${pointsSent} point${
+                  pointsSent === 1 ? '' : 's'
+                } recorded`
+              : 'Acquiring GPS signal…'}
+          </Text>
+        </Card>
       </ScrollView>
 
-      <View style={styles.buttonContainer}>
-        <PrimaryButton
-          label={loading ? 'STOPPING...' : 'STOP TASK'}
-          onPress={handleStopTask}
-          loading={loading}
-        />
+      <View style={{ paddingBottom: insets.bottom > 0 ? 0 : spacing.xs }}>
+        <ActionBar>
+          {isRunning ? (
+            <>
+              <ActionButton
+                label={busy ? 'Ending' : 'End task'}
+                onPress={confirmEnd}
+                loading={busy}
+                disabled={busy}
+              />
+              <GhostButton
+                label="Cancel this task"
+                onPress={confirmCancel}
+                disabled={busy}
+              />
+            </>
+          ) : (
+            <ActionButton
+              label="Back to home"
+              onPress={() => navigation.navigate('Main')}
+            />
+          )}
+        </ActionBar>
       </View>
-    </SafeAreaView>
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
+  root: { flex: 1, backgroundColor: colors.surface },
+  centered: {
     flex: 1,
-    backgroundColor: '#FBF2F1',
-  },
-
-  scrollView: {
-    flex: 1,
-  },
-
-  scrollContent: {
-    paddingBottom: 120,
-    paddingTop: 8,
-  },
-
-  bottomPadding: {
-    height: 20,
-  },
-
-  card: {
-    backgroundColor: '#FCEEEC',
-    borderRadius: 22,
-    padding: 24,
-    marginHorizontal: 16,
-    marginVertical: 14,
-    shadowColor: '#7A2E2E',
-    shadowOffset: {
-      width: 0,
-      height: 4,
-    },
-    shadowOpacity: 0.05,
-    shadowRadius: 12,
-    elevation: 2,
-  },
-
-  badgesContainer: {
-    flexDirection: 'row',
-    marginBottom: 20,
-    gap: 8,
-  },
-
-  detailsContainer: {
-    marginTop: 8,
     alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surface,
   },
-
-  taskTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1F1F1F',
-    marginBottom: 6,
-    textAlign: 'center',
-  },
-
-  trackingContainer: {
+  headerRow: {
     flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  backButton: {
+    width: sizes.tap,
+    height: sizes.tap,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: -spacing.md,
+  },
+  chevron: {
+    width: 10,
+    height: 10,
+    borderLeftWidth: 2,
+    borderBottomWidth: 2,
+    borderColor: '#ffffff',
+    transform: [{ rotate: '45deg' }],
+  },
+  headerTitle: { ...typography.bodySm, color: '#ffffff', letterSpacing: 0.2 },
+  gpsPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    height: 30,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.full,
+    backgroundColor: colors.onHeaderPill,
+  },
+  gpsDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#ffffff',
+  },
+  gpsText: {
+    ...typography.statusCaps,
+    fontSize: 11,
+    letterSpacing: 0.6,
+    color: '#ffffff',
+  },
+  destChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.base,
+    marginTop: spacing.lg,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radius.input,
+    backgroundColor: colors.onHeaderChip,
+    borderWidth: 1,
+    borderColor: colors.onHeaderChipBorder,
+  },
+  destText: { flex: 1, ...typography.bodySm, color: '#ffffff' },
+  scroll: {
+    paddingHorizontal: spacing.page,
+    paddingTop: 22,
+    paddingBottom: spacing.md,
+    alignItems: 'center',
+    gap: spacing.xxl,
+  },
+  ringWrap: {
+    width: RING,
+    height: RING,
     alignItems: 'center',
     justifyContent: 'center',
   },
-
-  trackingDot: {
-    width: 0,
-    height: 0,
-  },
-
-  trackingMessage: {
-    fontSize: 13,
-    color: '#B91C3C',
-    fontWeight: '600',
-  },
-
-  buttonContainer: {
+  ringInner: {
     position: 'absolute',
-    bottom: 70,
-    left: 0,
-    right: 0,
-    paddingHorizontal: 16,
+    width: sizes.ringInner,
+    height: sizes.ringInner,
+    borderRadius: sizes.ringInner / 2,
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
   },
+  clock: { ...typography.timer, color: colors.ink },
+  clockCaps: { ...typography.labelCaps, color: colors.mutedCaps },
+  detailCard: { width: '100%', gap: spacing.lg },
+  taskTitle: { ...typography.cardTitleLg, color: colors.ink },
+  statsRow: {
+    flexDirection: 'row',
+    borderTopWidth: 1,
+    borderTopColor: colors.divider,
+    paddingTop: spacing.lg,
+  },
+  stat: { flex: 1, gap: 3 },
+  statRight: { paddingLeft: spacing.xl },
+  statDivider: { width: 1, backgroundColor: colors.divider },
+  statValue: { ...typography.statValue, color: colors.ink },
+  statCaps: { ...typography.statCaps, color: colors.mutedCaps },
+  trackingNote: { ...typography.micro, color: colors.secondaryAlt },
 });
 
 export default ActiveTaskScreen;

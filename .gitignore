@@ -73,3 +73,7 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# Claude Design canvas export — reference for the Direction C implementation.
+# Keep locally; not needed to build the app.
+design/

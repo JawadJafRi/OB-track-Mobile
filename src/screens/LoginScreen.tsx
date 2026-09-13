@@ -1,156 +1,279 @@
 import React, { useState } from 'react';
-const DplLogo = require('../assets/images/dpl-logo.png');
 import {
-  ScrollView,
   View,
   Text,
   Image,
+  TextInput,
   StyleSheet,
+  ScrollView,
+  KeyboardAvoidingView,
+  Platform,
+  TouchableOpacity,
+  StatusBar,
 } from 'react-native';
-import InputField from '../components/InputField';
-import PasswordInput from '../components/PasswordInput';
-import CheckboxRow from '../components/CheckboxRow';
-import PrimaryButton from '../components/PrimaryButton';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
+
 import { colors } from '../theme/colors';
-import { spacing, radius } from '../theme/spacing';
+import { radius, sizes, spacing } from '../theme/spacing';
 import { typography } from '../theme/typography';
-import { verticalScale } from 'react-native-size-matters';
-import { scale } from 'react-native-size-matters';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../context/AuthContext';
+import { ApiError } from '../api/client';
+import { ActionButton, FieldLabel, Icon, Toggle } from '../components/ui';
 
-const LoginScreen = () => {
-    const personIcon = require('../assets/icons/person.png');
-    const { login } = useAuth();
-    const [email, setEmail] = useState('');
-    const [password, setPassword] = useState('');
-    const [rememberMe, setRememberMe] = useState(false);
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState('');
+const dplLogo = require('../assets/images/dpl-logo.png');
+const mailIcon = require('../assets/icons/mail.png');
+const lockIcon = require('../assets/icons/lock.png');
+const eyeIcon = require('../assets/icons/eye.png');
+const eyeOffIcon = require('../assets/icons/eye-off.png');
 
-    const handleLogin = async () => {
-      setLoading(true);
-      setError('');
-      try {
-        await login(email, password);
-      } catch (err) {
-        setError('Invalid Email or password.');
-      } finally {
-        setLoading(false);
+/**
+ * Direction C sign-in: a full-bleed red field carrying the logo and headline,
+ * with the form riding up over it on a rounded white sheet.
+ */
+const LoginScreen: React.FC = () => {
+  const { login } = useAuth();
+  const insets = useSafeAreaInsets();
+
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [remember, setRemember] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleLogin = async () => {
+    if (!email.trim() || !password) {
+      setError('Please enter your email and password.');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+    try {
+      await login(email.trim(), password);
+    } catch (err) {
+      // A failed request is not the same as a wrong password — reporting a
+      // network outage as "invalid credentials" sends people off changing a
+      // password that was never the problem.
+      if (err instanceof ApiError) {
+        setError(
+          err.statusCode === 401 ? 'Invalid email or password.' : err.message,
+        );
+      } else {
+        setError('Cannot reach the server. Check your connection.');
       }
-    };
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <ScrollView contentContainerStyle={styles.scrollContent}>
-        <View style={styles.card}>
-          {/* Logo Section */}
-          <View style={styles.logoSection}>
-            <Image style={styles.logo} source={DplLogo} resizeMode="contain" />
-            <Text style={styles.title}>Welcome Back</Text>
-            <Text style={styles.subtitle}>Please sign in to continue</Text>
+    <View style={styles.root}>
+      <StatusBar barStyle="light-content" backgroundColor={colors.gradientFrom} />
+
+      <Svg
+        style={StyleSheet.absoluteFill}
+        viewBox="0 0 1 1"
+        preserveAspectRatio="none"
+      >
+        <Defs>
+          <LinearGradient id="login" x1="0" y1="0" x2="0.26" y2="1">
+            <Stop offset="0" stopColor={colors.gradientFrom} />
+            <Stop offset="1" stopColor={colors.gradientTo} />
+          </LinearGradient>
+        </Defs>
+        <Rect x="0" y="0" width="1" height="1" fill="url(#login)" />
+      </Svg>
+
+      <KeyboardAvoidingView
+        style={styles.flex}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <ScrollView
+          contentContainerStyle={styles.scroll}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={[styles.hero, { paddingTop: insets.top + spacing.xxl }]}>
+            <View style={styles.logoChip}>
+              <Image source={dplLogo} style={styles.logo} resizeMode="contain" />
+            </View>
+            <View style={styles.heroText}>
+              <Text style={styles.title}>Welcome back</Text>
+              <Text style={styles.subtitle}>
+                Sign in to start tracking your tasks.
+              </Text>
+            </View>
           </View>
 
-          {/* Form Section */}
-          <View>
-            <InputField
-              label="Email"
-              leftIcon={personIcon}
-              placeholder="Enter Email"
-              value={email}
-              onChangeText={setEmail}
-              autoCapitalize="none"
-              keyboardType="email-address"
-            />
+          <View
+            style={[styles.sheet, { paddingBottom: insets.bottom + spacing.xxl }]}
+          >
+            <View style={styles.field}>
+              <FieldLabel>Email</FieldLabel>
+              <View style={styles.inputRow}>
+                <Icon source={mailIcon} size={20} color={colors.muted} />
+                <TextInput
+                  value={email}
+                  onChangeText={setEmail}
+                  placeholder="name@dpl.com"
+                  placeholderTextColor={colors.muted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardType="email-address"
+                  style={styles.input}
+                />
+              </View>
+            </View>
 
-            <PasswordInput value={password} onChangeText={setPassword} />
+            <View style={styles.field}>
+              <FieldLabel>Password</FieldLabel>
+              <View style={[styles.inputRow, styles.inputRowTrailing]}>
+                <Icon source={lockIcon} size={20} color={colors.muted} />
+                <TextInput
+                  value={password}
+                  onChangeText={setPassword}
+                  placeholder="••••••••"
+                  placeholderTextColor={colors.muted}
+                  secureTextEntry={!showPassword}
+                  autoCapitalize="none"
+                  style={styles.input}
+                />
+                <TouchableOpacity
+                  onPress={() => setShowPassword(v => !v)}
+                  style={styles.eyeButton}
+                  accessibilityLabel={
+                    showPassword ? 'Hide password' : 'Show password'
+                  }
+                >
+                  <Icon
+                    source={showPassword ? eyeOffIcon : eyeIcon}
+                    size={20}
+                    color={colors.secondary}
+                  />
+                </TouchableOpacity>
+              </View>
+            </View>
 
-            <CheckboxRow
-              checked={rememberMe}
-              onToggle={() => setRememberMe(!rememberMe)}
-              label="Remember Me"
-            />
+            <View style={styles.rememberRow}>
+              <TouchableOpacity
+                style={styles.rememberLeft}
+                activeOpacity={0.8}
+                onPress={() => setRemember(v => !v)}
+              >
+                <Toggle
+                  value={remember}
+                  onToggle={() => setRemember(v => !v)}
+                  width={44}
+                />
+                <Text style={styles.rememberLabel}>Keep me signed in</Text>
+              </TouchableOpacity>
+              <Text style={styles.help}>Need help?</Text>
+            </View>
 
-            <PrimaryButton
-              label="LOGIN"
+            {error ? <Text style={styles.error}>{error}</Text> : null}
+
+            <ActionButton
+              label={loading ? 'Signing in' : 'Sign in'}
               onPress={handleLogin}
               loading={loading}
+              disabled={loading}
             />
-            {error ? <Text style={styles.errorText}>{error}</Text> : null}
-          </View>
 
-          {/* Footer */}
-          <View style={styles.footer}>
-            <Text style={styles.footerText}>
+            <Text style={styles.footer}>
               For login issues, contact the Admin Department
             </Text>
-            <Text style={styles.versionText}>App Version 1.0.0</Text>
+            <Text style={styles.version}>App Version 1.0.0</Text>
           </View>
-        </View>
-      </ScrollView>
-    </SafeAreaView>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
-  safeArea: {
+  root: { flex: 1, backgroundColor: colors.gradientTo },
+  flex: { flex: 1 },
+  scroll: { flexGrow: 1 },
+  hero: {
+    paddingHorizontal: 26,
+    paddingBottom: 30,
+    gap: spacing.lg,
+  },
+  logoChip: {
+    alignSelf: 'flex-start',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.md,
+    backgroundColor: '#ffffff',
+  },
+  logo: { width: 96, height: 34 },
+  heroText: { gap: spacing.sm },
+  title: { ...typography.display, color: '#ffffff' },
+  subtitle: { ...typography.bodyStrong, color: '#ffffff' },
+  sheet: {
     flex: 1,
     backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.sheet,
+    borderTopRightRadius: radius.sheet,
+    paddingHorizontal: spacing.xxxl,
+    paddingTop: 26,
+    gap: spacing.xl,
   },
-  scrollContent: {
-    flexGrow: 1,
-    justifyContent: 'center',
-    padding: spacing.containerMargin,
-  },
-  card: {
-    backgroundColor: colors.surfaceContainerLowest,
-    borderRadius: radius.xl,
-    borderWidth: 1,
-    borderColor: colors.outlineVariant,
-    padding: spacing.lg,
-  },
-  logoSection: {
+  field: { gap: spacing.sm },
+  inputRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: spacing.xl,
+    gap: spacing.md,
+    height: sizes.field,
+    paddingHorizontal: spacing.xl,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.outlineStrong,
+    borderRadius: radius.input,
   },
-  logo: {
-    width: scale(128),
-    height: verticalScale(60),
-    marginBottom: spacing.md,
+  inputRowTrailing: { paddingRight: 6 },
+  input: {
+    flex: 1,
+    ...typography.body,
+    color: colors.ink,
+    padding: 0,
   },
-  title: {
-    ...typography.headlineLgMobile,
-    color: colors.onSurface,
-    marginBottom: spacing.base,
+  eyeButton: {
+    width: sizes.tap,
+    height: sizes.tap,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  subtitle: {
-    ...typography.bodyLg,
-    color: colors.secondary,
+  rememberRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
-  footer: {
-    marginTop: spacing.xl,
-    paddingTop: spacing.lg,
-    borderTopWidth: 1,
-    borderTopColor: colors.outlineVariant,
+  rememberLeft: {
+    flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.base,
+    minHeight: sizes.tap,
   },
-  footerText: {
-    ...typography.bodySm,
-    color: colors.onSurfaceVariant,
-    fontStyle: 'italic',
+  rememberLabel: { ...typography.bodySm, color: colors.inkSoft },
+  help: { ...typography.captionStrong, color: colors.primary },
+  error: {
+    ...typography.caption,
+    color: colors.error,
     textAlign: 'center',
   },
-  versionText: {
-    ...typography.versionText,
-    color: colors.secondary,
-    opacity: 0.7,
-  },
-  errorText: {
-    ...typography.bodySm,
-    color: colors.error ?? '#ba1a1a',
+  footer: {
+    ...typography.micro,
+    color: colors.secondaryAlt,
     textAlign: 'center',
     marginTop: spacing.sm,
+  },
+  version: {
+    ...typography.micro,
+    color: colors.muted,
+    textAlign: 'center',
   },
 });
 

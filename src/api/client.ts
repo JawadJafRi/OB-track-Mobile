@@ -1,6 +1,5 @@
 import { getTokens, saveTokens, clearTokens } from '../auth/tokenStorage';
-
-const BASE_URL = 'http://13.60.233.201/api/v1';
+import { BASE_URL } from '../config/api';
 
 // Point 7: something else (AuthContext) sets this callback once, at app startup.
 // The client calls it when refresh genuinely fails — it doesn't navigate itself.
@@ -50,7 +49,7 @@ async function refreshAccessToken(): Promise<string | null> {
       });
 
       return json.data.accessToken as string;
-    } catch (error) {
+    } catch {
       await clearTokens();
       onSessionExpired?.();
       return null;
@@ -60,6 +59,22 @@ async function refreshAccessToken(): Promise<string | null> {
   const result = await refreshPromise;
   refreshPromise = null; // clear so future 401s can trigger a fresh refresh
   return result;
+}
+
+/**
+ * Parse a JSON body without letting a non-JSON response explode.
+ *
+ * Behind nginx a 502 or a gateway timeout arrives as an HTML page; calling
+ * .json() on that throws a SyntaxError that no caller is prepared for. Returning
+ * an empty envelope instead lets the normal !response.ok path report the real
+ * status code.
+ */
+async function readJson(response: Response): Promise<any> {
+  try {
+    return await response.json();
+  } catch {
+    return { success: false, message: `Server error (${response.status}).` };
+  }
 }
 
 type RequestOptions = {
@@ -93,7 +108,7 @@ export async function apiRequest<T>(
     });
 
   let response = await doFetch();
-  let json = await response.json();
+  let json = await readJson(response);
 
   // Point 4: detect 401, attempt refresh, then retry ONCE.
   if (response.status === 401 && requiresAuth) {
@@ -105,12 +120,8 @@ export async function apiRequest<T>(
     }
 
     headers.Authorization = `Bearer ${newAccessToken}`;
-    response = await fetch(`${BASE_URL}${path}`, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    json = await response.json();
+    response = await doFetch();
+    json = await readJson(response);
   }
 
   if (!response.ok || !json.success) {

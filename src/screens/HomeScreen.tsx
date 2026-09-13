@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   ScrollView,
   View,
@@ -7,363 +7,581 @@ import {
   TouchableOpacity,
   Image,
   StyleSheet,
-  Alert,
+  RefreshControl,
+  ActivityIndicator,
+  StatusBar,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { useNavigation } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import KpiCard from '../components/KpiCard';
-import TaskCard from '../components/TaskCard';
-import CheckboxRow from '../components/CheckboxRow';
-import PrimaryButton from '../components/PrimaryButton';
+
+import GradientHeader from '../components/ui/GradientHeader';
+import { useDialog } from '../components/ui/DialogProvider';
+import {
+  ActionBar,
+  ActionButton,
+  Card,
+  FieldLabel,
+  Icon,
+  InitialsAvatar,
+  SectionTitle,
+  Toggle,
+  initialsOf,
+} from '../components/ui';
 import { colors } from '../theme/colors';
-import { spacing, radius } from '../theme/spacing';
+import { radius, sizes, spacing } from '../theme/spacing';
 import { typography } from '../theme/typography';
-import { moderateScale, verticalScale } from 'react-native-size-matters';
 import { RootStackParamList } from '../navigation/types';
+import { useAuth } from '../context/AuthContext';
+import {
+  createTask,
+  listEmployees,
+  listTasks,
+  startTask,
+} from '../api/tasks';
+import type { Employee, Task } from '../api/types';
+import { ApiError } from '../api/client';
+import { getCurrentFix, requestLocationPermission } from '../services/location';
+import { uuidv4 } from '../utils/uuid';
+import { firstName, formatElapsed, greetingFor, secondsSince, todayLabel } from '../utils/format';
 
 const dplLogo = require('../assets/images/dpl-logo.png');
-const avatarIcon = require('../assets/icons/avatar-placeholder.png');
-const taskAltIcon = require('../assets/icons/task-alt.png');
-const walkIcon = require('../assets/icons/walk.png');
-const scheduleIcon = require('../assets/icons/schedule.png');
 const micIcon = require('../assets/icons/mic.png');
 const infoIcon = require('../assets/icons/info.png');
-const mailIcon = require('../assets/icons/mail.png');
-const coffeeIcon = require('../assets/icons/coffee.png');
-const inventoryIcon = require('../assets/icons/inventory.png');
+const walkIcon = require('../assets/icons/walk.png');
+const taskAltIcon = require('../assets/icons/task-alt.png');
 
-const EMPLOYEE_OPTIONS = ['Ahmed Khan', 'Ali Hassan', 'Zubair Ahmed', 'Fatima Noor'];
+type Nav = NativeStackNavigationProp<RootStackParamList, 'Main'>;
 
-type HomeScreenNavigationProp = NativeStackNavigationProp<
-  RootStackParamList,
-  'Main'
->;
+/** Rotating chip colours for the employee list, as in the canvas. */
+const CHIP_COLORS = [colors.primary, colors.primaryBright, colors.primaryDark];
 
 const HomeScreen: React.FC = () => {
-  const navigation = useNavigation<HomeScreenNavigationProp>();
-  const [taskText, setTaskText] = useState<string>('');
-  const [isTopEmployee, setIsTopEmployee] = useState<boolean>(false);
-  const [selectedEmployee, setSelectedEmployee] = useState<string | null>(null);
-  const [isStartingTask, setIsStartingTask] = useState<boolean>(false);
+  const navigation = useNavigation<Nav>();
+  const insets = useSafeAreaInsets();
+  const { user } = useAuth();
+  const dialog = useDialog();
 
-  const handleStartTask = (): void => {
-    console.log('🔵 Start Task button pressed');
-    
-    if (!taskText.trim()) {
-      Alert.alert('Task Required', 'Please describe your task before starting.');
-      return;
+  const [taskText, setTaskText] = useState('');
+  const [destination, setDestination] = useState('');
+  const [isTop, setIsTop] = useState(false);
+  const [selected, setSelected] = useState<Employee | null>(null);
+  const [employees, setEmployees] = useState<Employee[]>([]);
+
+  const [running, setRunning] = useState<Task | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [loadError, setLoadError] = useState('');
+
+  const load = useCallback(async () => {
+    setLoadError('');
+    try {
+      const inProgress = await listTasks({ status: 'IN_PROGRESS', limit: 1 });
+      const active = inProgress.items[0] ?? null;
+      setRunning(active);
+      setElapsed(secondsSince(active?.startedAt));
+    } catch (error) {
+      setLoadError(
+        error instanceof ApiError
+          ? error.message
+          : 'Could not reach the server. Pull down to retry.',
+      );
+    } finally {
+      setLoading(false);
     }
+  }, []);
 
-    if (isTopEmployee && !selectedEmployee) {
-      Alert.alert('Employee Required', 'Please select an employee for this task.');
-      return;
-    }
+  useFocusEffect(
+    useCallback(() => {
+      load();
+    }, [load]),
+  );
 
-    console.log('🟢 All validations passed');
-    setIsStartingTask(true);
-    
-    setTimeout(() => {
-      console.log('🟡 Navigating to ActiveTask...');
-      setIsStartingTask(false);
-      try {
-        navigation.navigate('ActiveTask');
-        console.log('✅ Navigation called successfully');
-      } catch (error) {
-        console.error('❌ Navigation error:', error);
-        Alert.alert('Navigation Error', 'Could not navigate to active task screen.');
+  // Keeps the "in progress" banner's clock live while Home is on screen.
+  useFocusEffect(
+    useCallback(() => {
+      if (!running?.startedAt) {
+        return;
       }
-    }, 500);
+      const id = setInterval(
+        () => setElapsed(secondsSince(running.startedAt)),
+        1000,
+      );
+      return () => clearInterval(id);
+    }, [running?.startedAt]),
+  );
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await load();
+    setRefreshing(false);
   };
 
+  const onToggleTop = async () => {
+    const next = !isTop;
+    setIsTop(next);
+
+    if (!next) {
+      setSelected(null);
+      return;
+    }
+
+    if (employees.length === 0) {
+      try {
+        setEmployees((await listEmployees()).items);
+      } catch {
+        dialog.notify({
+          title: 'Could not load employees',
+          message: 'Please check your connection and try again.',
+        });
+        setIsTop(false);
+      }
+    }
+  };
+
+  const ready = taskText.trim().length > 0;
+
+  const handleStart = async () => {
+    if (!ready) {
+      return;
+    }
+
+    if (isTop && !selected) {
+      dialog.notify({
+        title: 'Choose an employee',
+        message: 'Pick who this task is for.',
+      });
+      return;
+    }
+
+    if (running) {
+      navigation.navigate('ActiveTask', { taskId: running.id });
+      return;
+    }
+
+    setStarting(true);
+    try {
+      const allowed = await requestLocationPermission();
+      if (!allowed) {
+        dialog.notify({
+          title: 'Location needed',
+          message:
+            'A task records where it starts and ends, so location access is required to begin.',
+        });
+        return;
+      }
+
+      // Fix first, then create: a failed GPS read leaves no orphan PENDING task.
+      const fix = await getCurrentFix();
+
+      const created = await createTask({
+        clientTaskId: uuidv4(),
+        description: taskText.trim(),
+        destination: destination.trim() || undefined,
+        employeeId: selected?.id,
+      });
+      await startTask(created.id, fix);
+
+      setTaskText('');
+      setDestination('');
+      setIsTop(false);
+      setSelected(null);
+
+      navigation.navigate('ActiveTask', { taskId: created.id });
+    } catch (error) {
+      dialog.notify({
+        title: 'Could not start the task',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Something went wrong. Please try again.',
+      });
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const topSummary = isTop
+    ? selected
+      ? `${selected.name}${selected.department ? ' · ' + selected.department : ''}`
+      : 'Choose the employee'
+    : 'Off — normal task';
+
+  if (loading) {
+    return (
+      <View style={styles.centered}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
+
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
-      <ScrollView 
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-      >
-        {/* Top App Bar */}
-        <View style={styles.topBar}>
-          <Image source={dplLogo} style={styles.logo} resizeMode="contain" />
-          <Text style={styles.appBarTitle}>DPL Office Boy</Text>
-          <View style={styles.avatarWrapper}>
-            <Image source={avatarIcon} style={styles.avatar} resizeMode="cover" />
+    <View style={styles.root}>
+      <StatusBar barStyle="light-content" backgroundColor={colors.gradientFrom} />
+
+      <GradientHeader>
+        <View style={styles.headerTop}>
+          <View style={styles.logoChip}>
+            <Image source={dplLogo} style={styles.logo} resizeMode="contain" />
           </View>
+          <TouchableOpacity
+            onPress={() => navigation.getParent()?.navigate('Profile')}
+            activeOpacity={0.8}
+          >
+            <InitialsAvatar name={user?.name} />
+          </TouchableOpacity>
         </View>
+        <View style={styles.greetingBlock}>
+          <Text style={styles.today}>{todayLabel()}</Text>
+          <Text style={styles.greeting}>
+            {greetingFor()}, {firstName(user?.name)}
+          </Text>
+        </View>
+      </GradientHeader>
 
-        <View style={styles.content}>
-          {/* Greeting */}
-          <View style={styles.greetingContainer}>
-            <Text style={styles.greeting}>Good Morning, Ahmed</Text>
-            <Text style={styles.subGreeting}>Office Boy | Maintenance Dept</Text>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+        }
+      >
+        {loadError ? (
+          <View style={styles.errorBanner}>
+            <Text style={styles.errorText}>{loadError}</Text>
+          </View>
+        ) : null}
+
+        {running ? (
+          <TouchableOpacity
+            style={styles.runningCard}
+            activeOpacity={0.88}
+            onPress={() =>
+              navigation.navigate('ActiveTask', { taskId: running.id })
+            }
+          >
+            <View style={styles.runningDot} />
+            <View style={styles.runningText}>
+              <Text style={styles.runningCaps}>
+                In progress · {formatElapsed(elapsed)}
+              </Text>
+              <Text style={styles.runningTitle} numberOfLines={1}>
+                {running.title || running.description}
+              </Text>
+            </View>
+            <Text style={styles.runningOpen}>Open</Text>
+          </TouchableOpacity>
+        ) : null}
+
+        <Card style={styles.formCard}>
+          <View style={styles.cardHead}>
+            <SectionTitle title="New task" />
           </View>
 
-          {/* KPI Row */}
-          <View style={styles.kpiRow}>
-            <KpiCard icon={taskAltIcon} label="Completed" value="3" />
-            <KpiCard icon={walkIcon} label="Distance" value="12.4 km" />
-            <KpiCard icon={scheduleIcon} label="Time" value="4h 20m" />
-          </View>
-
-          {/* Task Input */}
-          <View style={styles.inputSection}>
-            <View style={styles.taskInputWrapper}>
+          <View style={styles.field}>
+            <FieldLabel>Task</FieldLabel>
+            <View style={styles.textAreaRow}>
               <TextInput
-                style={styles.taskInput}
-                placeholder="Describe your task..."
-                placeholderTextColor={colors.secondaryFixedDim || '#999999'}
                 value={taskText}
                 onChangeText={setTaskText}
-                multiline={false}
+                placeholder="What are you going to do?"
+                placeholderTextColor={colors.muted}
+                multiline
+                numberOfLines={2}
+                style={styles.textArea}
               />
-              <TouchableOpacity style={styles.micButton} activeOpacity={0.7}>
-                <Image source={micIcon} style={styles.micIcon} resizeMode="contain" />
+              <TouchableOpacity
+                style={styles.micButton}
+                activeOpacity={0.75}
+                onPress={() =>
+                  dialog.notify({
+                    title: 'Voice input',
+                    message:
+                      'Speech-to-text is not part of this build yet. Please type the task for now.',
+                  })
+                }
+              >
+                <Icon source={micIcon} size={19} color={colors.primary} />
               </TouchableOpacity>
-            </View>
-            <View style={styles.infoRow}>
-              <Image source={infoIcon} style={styles.infoIcon} resizeMode="contain" />
-              <Text style={styles.infoText}>Tap the mic to speak your task</Text>
             </View>
           </View>
 
-          {/* Top 10 Employee Toggle */}
-          <View style={styles.toggleCard}>
-            <CheckboxRow
-              checked={isTopEmployee}
-              onToggle={() => setIsTopEmployee(!isTopEmployee)}
-              label="This task is for a Top 10 Employee"
-            />
-            {isTopEmployee && (
-              <View style={styles.employeeSection}>
-                <Text style={styles.selectLabel}>SELECT EMPLOYEE</Text>
-                <View style={styles.optionsList}>
-                  {EMPLOYEE_OPTIONS.map((name) => (
-                    <TouchableOpacity
-                      key={name}
-                      style={[
-                        styles.optionRow,
-                        selectedEmployee === name && styles.optionRowSelected,
-                      ]}
-                      onPress={() => setSelectedEmployee(name)}
-                      activeOpacity={0.7}
-                    >
-                      <Text style={styles.optionText}>{name}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
+          <View style={styles.field}>
+            <FieldLabel>
+              Destination <Text style={styles.optional}>· optional</Text>
+            </FieldLabel>
+            <View style={styles.inputRow}>
+              <Icon source={walkIcon} size={19} color={colors.muted} />
+              <TextInput
+                value={destination}
+                onChangeText={setDestination}
+                placeholder="Where are you going?"
+                placeholderTextColor={colors.muted}
+                style={styles.input}
+              />
+            </View>
+          </View>
+
+          <View style={styles.topSection}>
+            <TouchableOpacity
+              style={styles.topRow}
+              activeOpacity={0.8}
+              onPress={onToggleTop}
+            >
+              <View style={styles.topLabels}>
+                <Text style={styles.topTitle}>For a Top 10 employee</Text>
+                <Text style={styles.topSummary}>{topSummary}</Text>
               </View>
-            )}
+              <Toggle value={isTop} onToggle={onToggleTop} />
+            </TouchableOpacity>
+
+            {isTop ? (
+              <View style={styles.employeeList}>
+                {employees.length === 0 ? (
+                  <Text style={styles.topSummary}>No active employees found.</Text>
+                ) : (
+                  employees.map((employee, index) => {
+                    const on = selected?.id === employee.id;
+                    return (
+                      <TouchableOpacity
+                        key={employee.id}
+                        activeOpacity={0.8}
+                        onPress={() => setSelected(employee)}
+                        style={[
+                          styles.employeeRow,
+                          {
+                            borderColor: on ? colors.primary : colors.outline,
+                            backgroundColor: on ? colors.tintBgSoft : colors.card,
+                          },
+                        ]}
+                      >
+                        <View
+                          style={[
+                            styles.employeeChip,
+                            {
+                              backgroundColor:
+                                CHIP_COLORS[index % CHIP_COLORS.length],
+                            },
+                          ]}
+                        >
+                          <Text style={styles.employeeChipText}>
+                            {initialsOf(employee.name)}
+                          </Text>
+                        </View>
+                        <View style={styles.employeeLabels}>
+                          <Text style={styles.employeeName}>{employee.name}</Text>
+                          {employee.department ? (
+                            <Text style={styles.employeeDept}>
+                              {employee.department}
+                            </Text>
+                          ) : null}
+                        </View>
+                        <View
+                          style={[
+                            styles.radio,
+                            {
+                              borderColor: on ? colors.primary : colors.outline,
+                              backgroundColor: on
+                                ? colors.primary
+                                : 'transparent',
+                            },
+                          ]}
+                        />
+                      </TouchableOpacity>
+                    );
+                  })
+                )}
+              </View>
+            ) : null}
           </View>
+        </Card>
 
-          {/* Start Task Button */}
-          <PrimaryButton 
-            label={isStartingTask ? "STARTING..." : "▶  START TASK"} 
-            onPress={handleStartTask}
-            disabled={isStartingTask}
-          />
-
-          {/* Recent Tasks */}
-          <View style={styles.recentTasksSection}>
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Recent Tasks</Text>
-              <TouchableOpacity activeOpacity={0.7}>
-                <Text style={styles.viewAll}>VIEW ALL</Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.taskList}>
-              <TaskCard
-                icon={mailIcon}
-                title="Courier Delivery"
-                timeRange="10:12 AM - 10:47 AM (35 min)"
-                status="Completed"
-              />
-              <TaskCard
-                icon={coffeeIcon}
-                title="Cafeteria Service"
-                timeRange="09:30 AM - 09:45 AM (15 min)"
-                status="Completed"
-              />
-              <TaskCard
-                icon={inventoryIcon}
-                title="Stationery Pickup"
-                timeRange="08:15 AM - 09:00 AM (45 min)"
-                status="Completed"
-              />
-            </View>
-          </View>
+        <View style={styles.hintRow}>
+          <Icon source={infoIcon} size={14} color={colors.muted} />
+          <Text style={styles.hintText}>
+            Route and time are recorded until you end the task.
+          </Text>
         </View>
       </ScrollView>
-    </SafeAreaView>
+
+      <View style={{ paddingBottom: insets.bottom > 0 ? 0 : spacing.xs }}>
+        <ActionBar>
+          <ActionButton
+            label={starting ? 'Starting' : 'Start task'}
+            onPress={handleStart}
+            disabled={!ready || starting}
+            loading={starting}
+            icon={taskAltIcon}
+          />
+        </ActionBar>
+      </View>
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
-  safeArea: {
+  root: { flex: 1, backgroundColor: colors.surface },
+  centered: {
     flex: 1,
-    backgroundColor: colors.surface || '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surface,
   },
-  scrollContent: {
-    flexGrow: 1,
-  },
-  topBar: {
+  headerTop: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: colors.surface || '#FFFFFF',
-    borderBottomWidth: 1,
-    borderBottomColor: colors.outlineVariant || '#E0E0E0',
-    paddingHorizontal: spacing.containerMargin || 16,
-    paddingVertical: spacing.xs || 8,
   },
-  logo: {
-    width: moderateScale(80),
-    height: verticalScale(32),
+  logoChip: {
+    paddingVertical: 6,
+    paddingHorizontal: spacing.base,
+    borderRadius: radius.sm,
+    backgroundColor: '#ffffff',
   },
-  appBarTitle: {
-    ...typography.headlineMd,
-    color: colors.primary || '#1976D2',
-    fontWeight: 'bold',
+  logo: { width: 72, height: 26 },
+  greetingBlock: { marginTop: spacing.xl, gap: spacing.xs },
+  today: { ...typography.overline, color: '#ffffff' },
+  greeting: { ...typography.h1, color: '#ffffff' },
+  scroll: {
+    paddingHorizontal: spacing.page,
+    paddingTop: spacing.xl,
+    paddingBottom: spacing.md,
+    gap: spacing.lg,
   },
-  avatarWrapper: {
-    width: moderateScale(40),
-    height: moderateScale(40),
-    borderRadius: radius.full || 999,
-    borderWidth: 2,
-    borderColor: colors.primaryContainer || '#BBDEFB',
-    overflow: 'hidden',
-  },
-  avatar: {
-    width: '100%',
-    height: '100%',
-  },
-  content: {
-    paddingHorizontal: spacing.containerMargin || 16,
-    paddingVertical: spacing.md || 16,
-    gap: spacing.lg || 20,
-  },
-  greetingContainer: {
-    marginBottom: spacing.sm || 8,
-  },
-  greeting: {
-    ...typography.headlineLgMobile,
-    color: colors.onSurface || '#1A1A1A',
-  },
-  subGreeting: {
-    ...typography.bodySm,
-    color: colors.secondary || '#757575',
-  },
-  kpiRow: {
-    flexDirection: 'row',
-    gap: spacing.xs || 4,
-    justifyContent: 'space-between',
-  },
-  inputSection: {
-    marginVertical: spacing.sm || 8,
-  },
-  taskInputWrapper: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm || 8,
-    backgroundColor: colors.surfaceContainerLowest || '#FFFFFF',
+  errorBanner: {
+    backgroundColor: colors.tintBgSoft,
     borderWidth: 1,
-    borderColor: colors.outlineVariant || '#E0E0E0',
-    borderRadius: radius.full || 999,
-    paddingLeft: spacing.md || 16,
-    paddingRight: spacing.base || 12,
-    paddingVertical: spacing.base || 12,
+    borderColor: colors.tintBorder,
+    borderRadius: radius.input,
+    padding: spacing.lg,
   },
-  taskInput: {
+  errorText: { ...typography.caption, color: colors.primary },
+  runningCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    padding: spacing.xl,
+    borderRadius: radius.button,
+    backgroundColor: colors.primary,
+    shadowColor: colors.primary,
+    shadowOpacity: 0.45,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
+  },
+  runningDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#ffffff',
+  },
+  runningText: { flex: 1, gap: 3 },
+  runningCaps: { ...typography.statusCaps, fontSize: 11, color: '#ffffff' },
+  runningTitle: { ...typography.itemTitle, color: '#ffffff' },
+  runningOpen: { ...typography.statusCaps, fontSize: 12, color: '#ffffff' },
+  formCard: { gap: spacing.xl },
+  cardHead: {
+    paddingBottom: spacing.lg,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.divider,
+  },
+  field: { gap: spacing.sm },
+  optional: { fontFamily: typography.body.fontFamily, color: colors.muted },
+  textAreaRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.base,
+    backgroundColor: colors.inputBg,
+    borderWidth: 1,
+    borderColor: colors.inputBorder,
+    borderRadius: radius.input,
+    paddingVertical: spacing.md,
+    paddingLeft: spacing.lg,
+    paddingRight: spacing.md,
+  },
+  textArea: {
     flex: 1,
-    ...typography.bodyLg,
-    color: colors.onSurface || '#1A1A1A',
+    ...typography.body,
+    color: colors.ink,
+    minHeight: 52,
     padding: 0,
+    textAlignVertical: 'top',
   },
   micButton: {
-    width: moderateScale(48),
-    height: moderateScale(48),
-    borderRadius: radius.full || 999,
-    backgroundColor: colors.primaryContainer || '#BBDEFB',
+    width: sizes.tap,
+    height: sizes.tap,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.inputBorder,
+    backgroundColor: colors.card,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  micIcon: {
-    width: moderateScale(20),
-    height: moderateScale(20),
-    tintColor: colors.onPrimary || '#FFFFFF',
-  },
-  infoRow: {
+  inputRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.base || 12,
-    marginTop: spacing.sm || 8,
-    paddingHorizontal: spacing.md || 16,
-  },
-  infoIcon: {
-    width: moderateScale(14),
-    height: moderateScale(14),
-    tintColor: colors.secondary || '#757575',
-  },
-  infoText: {
-    ...typography.bodySm,
-    color: colors.secondary || '#757575',
-  },
-  toggleCard: {
-    backgroundColor: colors.surfaceContainerLow || '#F5F5F5',
+    gap: spacing.md,
+    height: sizes.field,
+    paddingHorizontal: spacing.lg,
+    backgroundColor: colors.inputBg,
     borderWidth: 1,
-    borderColor: colors.outlineVariant || '#E0E0E0',
-    borderRadius: radius.xl || 20,
-    padding: spacing.md || 16,
-    gap: spacing.md || 16,
+    borderColor: colors.inputBorder,
+    borderRadius: radius.input,
   },
-  employeeSection: {
-    marginTop: spacing.sm || 8,
+  input: { flex: 1, ...typography.body, color: colors.ink, padding: 0 },
+  topSection: {
+    gap: spacing.md,
+    paddingTop: spacing.lg,
+    borderTopWidth: 1,
+    borderTopColor: colors.divider,
   },
-  selectLabel: {
-    ...typography.labelCaps,
-    color: colors.secondary || '#757575',
-    marginBottom: spacing.xs || 4,
+  topRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    minHeight: 52,
   },
-  optionsList: {
-    gap: spacing.base || 12,
+  topLabels: { flex: 1, gap: 2 },
+  topTitle: { ...typography.itemTitle, color: colors.ink },
+  topSummary: { ...typography.caption, color: colors.secondaryAlt },
+  employeeList: { gap: spacing.sm },
+  employeeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    minHeight: 58,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    borderWidth: 1.5,
+    borderRadius: radius.input,
   },
-  optionRow: {
-    height: verticalScale(48),
+  employeeChip: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: spacing.md || 16,
-    backgroundColor: colors.surfaceContainerLowest || '#FFFFFF',
-    borderWidth: 1,
-    borderColor: colors.outlineVariant || '#E0E0E0',
-    borderRadius: radius.lg || 16,
   },
-  optionRowSelected: {
-    borderColor: colors.primary || '#1976D2',
-    borderWidth: 2,
+  employeeChipText: {
+    fontFamily: typography.cardTitle.fontFamily,
+    fontSize: 13,
+    color: '#ffffff',
   },
-  optionText: {
-    ...typography.bodyLg,
-    color: colors.onSurface || '#1A1A1A',
-  },
-  recentTasksSection: {
-    marginTop: spacing.sm || 8,
-  },
-  sectionHeader: {
+  employeeLabels: { flex: 1, gap: 1 },
+  employeeName: { ...typography.itemTitle, color: colors.ink },
+  employeeDept: { ...typography.caption, color: colors.secondaryAlt },
+  radio: { width: 18, height: 18, borderRadius: 9, borderWidth: 1.5 },
+  hintRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: spacing.sm || 8,
+    gap: spacing.sm,
+    paddingHorizontal: spacing.xs,
   },
-  sectionTitle: {
-    ...typography.headlineMd,
-    color: colors.onSurface || '#1A1A1A',
-  },
-  viewAll: {
-    ...typography.labelCaps,
-    color: colors.primary || '#1976D2',
-  },
-  taskList: {
-    gap: spacing.xs || 4,
-  },
+  hintText: { ...typography.micro, color: colors.secondaryAlt },
 });
 
 export default HomeScreen;

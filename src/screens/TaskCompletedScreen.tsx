@@ -1,292 +1,397 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
   TextInput,
-  Image,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
+  ActivityIndicator,
+  StatusBar,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
+import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 
-interface TaskCompletedData {
-  employeeName: string;
-  taskTitle: string;
-  duration: string;
-  distance: string;
-  destination: string;
-  mapImageUrl?: string;
-}
+import { useDialog } from '../components/ui/DialogProvider';
+import {
+  ActionBar,
+  ActionButton,
+  Card,
+  GhostButton,
+  Icon,
+  SectionTitle,
+} from '../components/ui';
+import { colors } from '../theme/colors';
+import { radius, sizes, spacing } from '../theme/spacing';
+import { typography } from '../theme/typography';
+import { RootStackParamList } from '../navigation/types';
+import { getTask, submitTask, updateSettlement } from '../api/tasks';
+import type { Task } from '../api/types';
+import { formatAmount, formatDistance, formatDuration } from '../utils/format';
 
+const checkIcon = require('../assets/icons/check.png');
+
+type Nav = NativeStackNavigationProp<RootStackParamList, 'TaskCompleted'>;
+type Route = RouteProp<RootStackParamList, 'TaskCompleted'>;
+
+/**
+ * Wrap-up. Everything shown is read back from the server — distance and
+ * duration are computed there when the task ends, so the previous screen could
+ * not supply them even if it wanted to.
+ */
 const TaskCompletedScreen: React.FC = () => {
-  const [remarks, setRemarks] = useState<string>('');
+  const navigation = useNavigation<Nav>();
+  const { params } = useRoute<Route>();
+  const insets = useSafeAreaInsets();
+  const dialog = useDialog();
 
-  // Replace with real data passed via navigation route params / API response
-  const [taskData] = useState<TaskCompletedData>({
-    employeeName: 'Ahmed',
-    taskTitle: 'Deposit cheque at HBL',
-    duration: '18 Minutes',
-    distance: '6.2 km',
-    destination: 'HBL Bank, Satellite Town',
-    mapImageUrl: undefined,
-  });
+  const [task, setTask] = useState<Task | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const [received, setReceived] = useState('');
+  const [returned, setReturned] = useState('');
+  const [vendor, setVendor] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    getTask(params.taskId)
+      .then(result => {
+        if (cancelled) {
+          return;
+        }
+        setTask(result);
+        setReceived(result.amountReceived ? String(result.amountReceived) : '');
+        setReturned(result.amountReturned ? String(result.amountReturned) : '');
+        setVendor(result.vendorDetails ?? '');
+      })
+      .catch(error => {
+        dialog
+          .notify({
+            title: 'Could not load the task',
+            message:
+              error instanceof Error ? error.message : 'Please try again.',
+            dismissLabel: 'Back',
+          })
+          .then(() => navigation.navigate('Main'));
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [params.taskId, navigation, dialog]);
+
+  const toNumber = (raw: string): number => {
+    const n = Number(raw.replace(/[^0-9.]/g, ''));
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const rec = toNumber(received);
+  const ret = toNumber(returned);
+  const over = ret > rec;
+
+  const handleSubmit = async () => {
+    setSaving(true);
+    try {
+      // Settlement first: submitting locks the task, so amounts must land before it.
+      await updateSettlement(params.taskId, {
+        amountReceived: rec,
+        amountReturned: ret,
+        vendorDetails: vendor.trim() || undefined,
+      });
+      await submitTask(params.taskId);
+
+      await dialog.notify({
+        title: 'Submitted',
+        message: 'This task has been sent to the admin.',
+        dismissLabel: 'Done',
+      });
+      navigation.navigate('Main');
+    } catch (error) {
+      dialog.notify({
+        title: 'Could not submit',
+        message: error instanceof Error ? error.message : 'Please try again.',
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading || !task) {
+    return (
+      <View style={styles.centered}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
+
+  const submitted = Boolean(task.submittedAt);
 
   return (
-    <SafeAreaView style={styles.container}>
+    <View style={[styles.root, { paddingTop: insets.top }]}>
+      <StatusBar barStyle="dark-content" backgroundColor={colors.surface} />
+
       <ScrollView
+        contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
       >
-        {/* Page title */}
-        <Text style={styles.pageTitle}>Task Completed</Text>
-
-        {/* Success badge */}
-        <View style={styles.successSection}>
+        <View style={styles.hero}>
           <View style={styles.checkBadge}>
-            <Text style={styles.checkMark}>✓</Text>
+            <Icon source={checkIcon} size={26} color={colors.primary} />
           </View>
-          <Text style={styles.successTitle}>✓ Task Completed</Text>
-          <Text style={styles.successSubtitle}>
-            Great job, {taskData.employeeName}!
+          <Text style={styles.heroTitle}>Task completed</Text>
+          <Text style={styles.heroSubtitle}>
+            {task.title || task.description}
           </Text>
         </View>
 
-        {/* Task summary card */}
-        <View style={styles.card}>
-          <Text style={styles.activeTaskLabel}>ACTIVE TASK</Text>
-          <Text style={styles.taskTitle}>{taskData.taskTitle}</Text>
-
-          <View style={styles.statsRow}>
-            <View style={styles.statItem}>
-              <Text style={styles.statIcon}>⏱</Text>
-              <View>
-                <Text style={styles.statLabel}>Duration</Text>
-                <Text style={styles.statValue}>{taskData.duration}</Text>
-              </View>
-            </View>
-
-            <View style={styles.statItem}>
-              <Text style={styles.statIcon}>📏</Text>
-              <View>
-                <Text style={styles.statLabel}>Distance</Text>
-                <Text style={styles.statValue}>{taskData.distance}</Text>
-              </View>
-            </View>
+        <Card style={styles.summaryCard}>
+          <View style={styles.summaryItem}>
+            <Text style={styles.summaryValue}>
+              {formatDuration(task.durationSeconds)}
+            </Text>
+            <Text style={styles.summaryCaps}>Duration</Text>
           </View>
-
-          <View style={styles.destinationRow}>
-            <Text style={styles.statIcon}>📍</Text>
-            <View>
-              <Text style={styles.statLabel}>Destination</Text>
-              <Text style={styles.statValue}>{taskData.destination}</Text>
-            </View>
+          <View style={styles.summaryDivider} />
+          <View style={styles.summaryItem}>
+            <Text style={styles.summaryValue}>
+              {formatDistance(task.distanceMeters)}
+            </Text>
+            <Text style={styles.summaryCaps}>Distance</Text>
           </View>
-        </View>
+        </Card>
 
-        {/* Map preview */}
-        <View style={styles.mapWrapper}>
-          {taskData.mapImageUrl ? (
-            <Image source={{ uri: taskData.mapImageUrl }} style={styles.mapImage} />
-          ) : (
-            <View style={styles.mapPlaceholder}>
-              <View style={styles.routeLine} />
-              <Text style={styles.mapPlaceholderText}>Route Preview</Text>
+        {submitted ? (
+          <Card style={styles.gap14}>
+            <SectionTitle title="Petty cash" />
+            <View style={styles.lockedRow}>
+              <Text style={styles.lockedLabel}>You took</Text>
+              <Text style={styles.lockedValue}>
+                PKR {formatAmount(task.amountReceived)}
+              </Text>
             </View>
-          )}
-        </View>
+            <View style={styles.lockedRow}>
+              <Text style={styles.lockedLabel}>You brought back</Text>
+              <Text style={styles.lockedValue}>
+                PKR {formatAmount(task.amountReturned)}
+              </Text>
+            </View>
+            {task.vendorDetails ? (
+              <Text style={styles.vendorNote}>{task.vendorDetails}</Text>
+            ) : null}
+            <Text style={styles.submittedNote}>
+              Already submitted — settlement is locked.
+            </Text>
+          </Card>
+        ) : (
+          <Card style={styles.gap14}>
+            <SectionTitle
+              title="Petty cash"
+              trailing={<Text style={styles.skipHint}>Skip if none</Text>}
+            />
 
-        {/* Remarks */}
-        <View style={styles.remarksSection}>
-          <Text style={styles.remarksLabel}>
-            Remarks <Text style={styles.optionalText}>(Optional)</Text>
-          </Text>
-          <TextInput
-            style={styles.remarksInput}
-            placeholder="Task completed"
-            placeholderTextColor="#B0B0B0"
-            value={remarks}
-            onChangeText={setRemarks}
-            multiline
-            numberOfLines={3}
-          />
-        </View>
+            <View style={styles.moneyRow}>
+              <Text style={styles.moneyLabel}>You took</Text>
+              <Text style={styles.currency}>PKR</Text>
+              <TextInput
+                value={received}
+                onChangeText={setReceived}
+                placeholder="0"
+                placeholderTextColor={colors.muted}
+                keyboardType="decimal-pad"
+                style={styles.moneyInput}
+              />
+            </View>
 
-        <View style={styles.bottomPadding} />
+            <View style={styles.moneyRow}>
+              <Text style={styles.moneyLabel}>You brought back</Text>
+              <Text style={styles.currency}>PKR</Text>
+              <TextInput
+                value={returned}
+                onChangeText={setReturned}
+                placeholder="0"
+                placeholderTextColor={colors.muted}
+                keyboardType="decimal-pad"
+                style={styles.moneyInput}
+              />
+            </View>
+
+            <View
+              style={[
+                styles.spentPanel,
+                {
+                  backgroundColor: over ? colors.tintBgSoft : colors.fieldBg,
+                  borderColor: over ? colors.tintBorder : colors.outline,
+                },
+              ]}
+            >
+              <View style={styles.spentLabels}>
+                <Text
+                  style={[
+                    styles.spentLabel,
+                    { color: over ? colors.primary : colors.ink },
+                  ]}
+                >
+                  {over ? 'Owed back to you' : 'Spent on this task'}
+                </Text>
+                <Text style={styles.spentHint}>
+                  {over
+                    ? 'You returned more than you took'
+                    : 'Took minus brought back'}
+                </Text>
+              </View>
+              <Text
+                style={[
+                  styles.spentValue,
+                  { color: over ? colors.primary : colors.ink },
+                ]}
+              >
+                {formatAmount(rec - ret)}
+              </Text>
+            </View>
+
+            <View style={styles.vendorField}>
+              <Text style={styles.moneyLabel}>Vendor / invoice</Text>
+              <TextInput
+                value={vendor}
+                onChangeText={setVendor}
+                placeholder="Shop name, branch, invoice number…"
+                placeholderTextColor={colors.muted}
+                style={styles.vendorInput}
+                multiline
+              />
+            </View>
+          </Card>
+        )}
       </ScrollView>
-    </SafeAreaView>
+
+      <View style={{ paddingBottom: insets.bottom > 0 ? 0 : spacing.xs }}>
+        <ActionBar>
+          {submitted ? (
+            <ActionButton
+              label="Back to home"
+              onPress={() => navigation.navigate('Main')}
+            />
+          ) : (
+            <>
+              <ActionButton
+                label={saving ? 'Submitting' : 'Submit to admin'}
+                onPress={handleSubmit}
+                loading={saving}
+                disabled={saving}
+              />
+              <GhostButton
+                label="Finish this later"
+                onPress={() => navigation.navigate('Main')}
+                disabled={saving}
+              />
+            </>
+          )}
+        </ActionBar>
+      </View>
+    </View>
   );
 };
 
-const RED = '#DC2626';
-const GREEN = '#22C55E';
-const INK = '#1A1A2E';
-const MUTED = '#8A8A8A';
-const BLUE = '#3B82F6';
-
 const styles = StyleSheet.create({
-  container: {
+  root: { flex: 1, backgroundColor: colors.surface },
+  centered: {
     flex: 1,
-    backgroundColor: '#FFFFFF',
-  },
-  scrollContent: {
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 40,
-  },
-  pageTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: RED,
-    textAlign: 'center',
-    marginBottom: 20,
-  },
-  successSection: {
     alignItems: 'center',
-    marginBottom: 24,
+    justifyContent: 'center',
+    backgroundColor: colors.surface,
   },
+  scroll: {
+    paddingHorizontal: spacing.page,
+    paddingTop: spacing.lg,
+    paddingBottom: spacing.md,
+    gap: spacing.lg,
+  },
+  hero: { alignItems: 'center', gap: spacing.base, paddingVertical: spacing.sm },
   checkBadge: {
-    width: 72,
-    height: 72,
-    borderRadius: 18,
-    backgroundColor: GREEN,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 14,
-    shadowColor: GREEN,
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.3,
-    shadowRadius: 10,
-    elevation: 5,
-  },
-  checkMark: {
-    color: '#FFFFFF',
-    fontSize: 34,
-    fontWeight: '800',
-  },
-  successTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: INK,
-    marginBottom: 4,
-  },
-  successSubtitle: {
-    fontSize: 13,
-    color: MUTED,
-  },
-  card: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 18,
-    marginBottom: 18,
-    borderWidth: 1,
-    borderColor: '#F0F0F0',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.04,
-    shadowRadius: 8,
-    elevation: 2,
-  },
-  activeTaskLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: RED,
-    letterSpacing: 0.5,
-    marginBottom: 6,
-  },
-  taskTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: INK,
-    marginBottom: 16,
-  },
-  statsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 16,
-  },
-  statItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  destinationRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderTopWidth: 1,
-    borderTopColor: '#F5F5F5',
-    paddingTop: 14,
-  },
-  statIcon: {
-    fontSize: 16,
-    marginRight: 10,
-  },
-  statLabel: {
-    fontSize: 12,
-    color: MUTED,
-    marginBottom: 2,
-  },
-  statValue: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: INK,
-  },
-  mapWrapper: {
-    borderRadius: 16,
-    overflow: 'hidden',
-    marginBottom: 18,
-    height: 150,
-  },
-  mapImage: {
-    width: '100%',
-    height: '100%',
-  },
-  mapPlaceholder: {
-    flex: 1,
-    backgroundColor: '#E8EAED',
+    width: 62,
+    height: 62,
+    borderRadius: 31,
+    backgroundColor: colors.tintBg,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  routeLine: {
-    position: 'absolute',
-    width: 120,
-    height: 3,
-    backgroundColor: '#9CA3AF',
-    borderRadius: 2,
-    transform: [{ rotate: '35deg' }],
+  heroTitle: { ...typography.h2, color: colors.ink },
+  heroSubtitle: {
+    ...typography.bodySmPlain,
+    color: colors.secondaryAlt,
+    textAlign: 'center',
   },
-  mapPlaceholderText: {
-    fontSize: 12,
-    color: '#9CA3AF',
-    fontWeight: '600',
+  summaryCard: {
+    flexDirection: 'row',
+    paddingVertical: spacing.card,
+    paddingHorizontal: spacing.sm,
   },
-  remarksSection: {
-    marginBottom: 8,
-  },
-  remarksLabel: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: INK,
-    marginBottom: 10,
-  },
-  optionalText: {
-    fontSize: 13,
-    fontWeight: '500',
-    color: BLUE,
-  },
-  remarksInput: {
+  summaryItem: { flex: 1, alignItems: 'center', gap: 3 },
+  summaryDivider: { width: 1, backgroundColor: colors.divider },
+  summaryValue: { ...typography.h2, color: colors.ink },
+  summaryCaps: { ...typography.statCaps, color: colors.mutedCaps },
+  gap14: { gap: spacing.lg },
+  skipHint: { ...typography.micro, color: colors.muted },
+  moneyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    height: sizes.control,
+    paddingHorizontal: spacing.lg,
+    backgroundColor: colors.fieldBg,
     borderWidth: 1,
-    borderColor: '#E5E5E5',
-    borderRadius: 12,
-    padding: 14,
-    fontSize: 14,
-    color: INK,
+    borderColor: colors.fieldBorder,
+    borderRadius: radius.input,
+  },
+  moneyLabel: { flex: 1, ...typography.bodySm, color: colors.inkSoft },
+  currency: { ...typography.fieldLabel, color: colors.muted },
+  moneyInput: {
+    width: 110,
+    ...typography.amountInput,
+    color: colors.ink,
+    textAlign: 'right',
+    padding: 0,
+  },
+  spentPanel: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    padding: spacing.xl,
+    borderRadius: radius.input,
+    borderWidth: 1.5,
+  },
+  spentLabels: { flex: 1, gap: 2 },
+  spentLabel: { ...typography.bodySm, fontFamily: typography.cardTitle.fontFamily },
+  spentHint: { ...typography.micro, color: colors.secondaryAlt },
+  spentValue: { ...typography.amount },
+  vendorField: { gap: spacing.sm },
+  vendorInput: {
+    ...typography.body,
+    color: colors.ink,
+    backgroundColor: colors.fieldBg,
+    borderWidth: 1,
+    borderColor: colors.fieldBorder,
+    borderRadius: radius.input,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    minHeight: 72,
     textAlignVertical: 'top',
-    minHeight: 80,
-    backgroundColor: '#FAFAFA',
   },
-  bottomPadding: {
-    height: 20,
+  lockedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
+  lockedLabel: { ...typography.bodySm, color: colors.secondaryAlt },
+  lockedValue: { ...typography.itemTitle, color: colors.ink },
+  vendorNote: { ...typography.caption, color: colors.secondaryAlt },
+  submittedNote: { ...typography.micro, color: colors.muted },
 });
 
 export default TaskCompletedScreen;
