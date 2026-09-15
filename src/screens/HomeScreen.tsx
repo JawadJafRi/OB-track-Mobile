@@ -12,8 +12,13 @@ import {
   StatusBar,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import {
+  useNavigation,
+  useFocusEffect,
+  type CompositeNavigationProp,
+} from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import type { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 
 import GradientHeader from '../components/ui/GradientHeader';
 import { useDialog } from '../components/ui/DialogProvider';
@@ -31,7 +36,7 @@ import {
 import { colors } from '../theme/colors';
 import { radius, sizes, spacing } from '../theme/spacing';
 import { typography } from '../theme/typography';
-import { RootStackParamList } from '../navigation/types';
+import { MainTabParamList, RootStackParamList } from '../navigation/types';
 import { useAuth } from '../context/AuthContext';
 import {
   createTask,
@@ -43,6 +48,7 @@ import type { Employee, Task } from '../api/types';
 import { ApiError } from '../api/client';
 import { getCurrentFix, requestLocationPermission } from '../services/location';
 import { uuidv4 } from '../utils/uuid';
+import { useKeyboardVisible } from '../utils/useKeyboardVisible';
 import { firstName, formatElapsed, greetingFor, secondsSince, todayLabel } from '../utils/format';
 
 const dplLogo = require('../assets/images/dpl-logo.png');
@@ -51,7 +57,25 @@ const infoIcon = require('../assets/icons/info.png');
 const walkIcon = require('../assets/icons/walk.png');
 const taskAltIcon = require('../assets/icons/task-alt.png');
 
-type Nav = NativeStackNavigationProp<RootStackParamList, 'Main'>;
+/**
+ * Home sits inside the tab navigator, which itself sits inside the root stack,
+ * and it navigates to both: `Profile` is a sibling TAB, while `ActiveTask` and
+ * `TaskCompleted` are routes on the parent STACK.
+ *
+ * Typing this as the stack navigation alone described only half of that. The
+ * avatar then had to reach for `getParent()` to open Profile, which goes the
+ * wrong way — up into the root stack, whose routes are Login, Main, ActiveTask
+ * and TaskCompleted. There is no Profile up there, so the action fell through
+ * every navigator and the press failed with "not handled by any navigator".
+ *
+ * A composite type names both navigators, so `navigate` resolves a tab route in
+ * the tab navigator and a stack route in the stack — and a wrong screen name
+ * fails at compile time instead of on a tap.
+ */
+type Nav = CompositeNavigationProp<
+  BottomTabNavigationProp<MainTabParamList, 'Home'>,
+  NativeStackNavigationProp<RootStackParamList>
+>;
 
 /** Rotating chip colours for the employee list, as in the canvas. */
 const CHIP_COLORS = [colors.primary, colors.primaryBright, colors.primaryDark];
@@ -61,6 +85,7 @@ const HomeScreen: React.FC = () => {
   const insets = useSafeAreaInsets();
   const { user } = useAuth();
   const dialog = useDialog();
+  const keyboardVisible = useKeyboardVisible();
 
   const [taskText, setTaskText] = useState('');
   const [destination, setDestination] = useState('');
@@ -222,30 +247,41 @@ const HomeScreen: React.FC = () => {
     <View style={styles.root}>
       <StatusBar barStyle="light-content" backgroundColor={colors.gradientFrom} />
 
-      <GradientHeader>
+      {/*
+        While typing the header collapses to just the logo row. The greeting is
+        the single biggest block on screen and says nothing the user needs mid
+        sentence, so it is the first thing to give up its space to the keyboard.
+      */}
+      <GradientHeader paddingBottom={keyboardVisible ? spacing.sm : 26}>
         <View style={styles.headerTop}>
           <View style={styles.logoChip}>
             <Image source={dplLogo} style={styles.logo} resizeMode="contain" />
           </View>
           <TouchableOpacity
-            onPress={() => navigation.getParent()?.navigate('Profile')}
+            onPress={() => navigation.navigate('Profile')}
             activeOpacity={0.8}
           >
             <InitialsAvatar name={user?.name} />
           </TouchableOpacity>
         </View>
-        <View style={styles.greetingBlock}>
-          <Text style={styles.today}>{todayLabel()}</Text>
-          <Text style={styles.greeting}>
-            {greetingFor()}, {firstName(user?.name)}
-          </Text>
-        </View>
+        {keyboardVisible ? null : (
+          <View style={styles.greetingBlock}>
+            <Text style={styles.today}>{todayLabel()}</Text>
+            <Text style={styles.greeting}>
+              {greetingFor()}, {firstName(user?.name)}
+            </Text>
+          </View>
+        )}
       </GradientHeader>
 
       <ScrollView
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
+        // Dragging the form puts the keyboard away, which is also what brings
+        // the Start task button back — so finishing the form and reaching the
+        // button is one gesture rather than a dismiss-then-tap.
+        keyboardDismissMode="on-drag"
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
         }
@@ -408,17 +444,25 @@ const HomeScreen: React.FC = () => {
         </View>
       </ScrollView>
 
-      <View style={{ paddingBottom: insets.bottom > 0 ? 0 : spacing.xs }}>
-        <ActionBar>
-          <ActionButton
-            label={starting ? 'Starting' : 'Start task'}
-            onPress={handleStart}
-            disabled={!ready || starting}
-            loading={starting}
-            icon={taskAltIcon}
-          />
-        </ActionBar>
-      </View>
+      {/*
+        Hidden while typing. The button cannot be used mid-sentence anyway — the
+        form is still being filled in — and at that moment it is sitting on the
+        few hundred pixels the text field actually needs. Dismissing the keyboard
+        (tap outside, or the back gesture) brings it straight back.
+      */}
+      {keyboardVisible ? null : (
+        <View style={{ paddingBottom: insets.bottom > 0 ? 0 : spacing.xs }}>
+          <ActionBar>
+            <ActionButton
+              label={starting ? 'Starting' : 'Start task'}
+              onPress={handleStart}
+              disabled={!ready || starting}
+              loading={starting}
+              icon={taskAltIcon}
+            />
+          </ActionBar>
+        </View>
+      )}
     </View>
   );
 };

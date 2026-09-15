@@ -39,6 +39,10 @@ const MainTabNavigator: React.FC = () => (
   <Tab.Navigator
     screenOptions={{
       headerShown: false,
+      // The tab bar is navigation, not input: while the keyboard is up it only
+      // eats vertical space the form needs. Built into bottom-tabs, so it costs
+      // nothing and stays in step with the keyboard on both platforms.
+      tabBarHideOnKeyboard: true,
       tabBarActiveTintColor: colors.primary,
       tabBarInactiveTintColor: colors.muted,
       tabBarStyle: styles.bar,
