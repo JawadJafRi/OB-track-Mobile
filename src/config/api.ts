@@ -10,6 +10,8 @@
  * and set DEV_BASE_URL to `http://<your-laptop-lan-ip>:3000/api/v1`.
  */
 const DEV_BASE_URL = 'http://localhost:3000/api/v1';
-const PROD_BASE_URL = 'http://13.60.233.201/api/v1';
+// TEMPORARY — local verification build. Revert to
+// 'http://13.205.21.213/api/v1' before shipping.
+const PROD_BASE_URL = 'http://localhost:3000/api/v1';
 
 export const BASE_URL = __DEV__ ? DEV_BASE_URL : PROD_BASE_URL;
