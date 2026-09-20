@@ -22,7 +22,12 @@ import { typography } from '../theme/typography';
 import { RootStackParamList } from '../navigation/types';
 import { addLocations, cancelTask, endTask, getTask } from '../api/tasks';
 import type { LocationBatchItem, Task } from '../api/types';
-import { getCurrentFix, watchPosition } from '../services/location';
+import {
+  getCurrentFix,
+  haversineMeters,
+  watchPosition,
+} from '../services/location';
+import { startTracking, stopTracking } from '../services/taskTracking';
 import {
   formatClock,
   formatDistance,
@@ -55,6 +60,23 @@ const ActiveTaskScreen: React.FC = () => {
   const [busy, setBusy] = useState(false);
   const [gpsOk, setGpsOk] = useState(false);
   const [pointsSent, setPointsSent] = useState(0);
+
+  /**
+   * Distance measured on the device, from the fixes as they arrive.
+   *
+   * The screen used to render `task.distanceMeters`, which the server only
+   * computes when the task ENDS — so it was null for the whole task and the
+   * stat read "0 km" however far you walked. The number was never wrong,
+   * exactly; it just did not exist yet. Measuring here means the figure moves
+   * while you walk, and it keeps moving with no network at all.
+   *
+   * The server still recomputes the authoritative distance from the uploaded
+   * points on end; this is the live read-out, not the record.
+   */
+  const [liveMeters, setLiveMeters] = useState(0);
+  /** Every fix seen this session, uploaded or not — see `trackingNote`. */
+  const [pointsSeen, setPointsSeen] = useState(0);
+  const lastFix = useRef<{ latitude: number; longitude: number } | null>(null);
 
   const buffer = useRef<LocationBatchItem[]>([]);
   const flushing = useRef(false);
@@ -125,15 +147,36 @@ const ActiveTaskScreen: React.FC = () => {
       point => {
         setGpsOk(true);
         buffer.current.push(point);
+        setPointsSeen(previous => previous + 1);
+
+        // Add the leg from the previous fix. `watchPosition` already applies a
+        // 10 m distanceFilter, so GPS jitter while standing still does not
+        // accumulate into a phantom walk.
+        const previousFix = lastFix.current;
+        if (previousFix) {
+          setLiveMeters(
+            current => current + haversineMeters(previousFix, point),
+          );
+        }
+        lastFix.current = { latitude: point.latitude, longitude: point.longitude };
       },
       () => setGpsOk(false),
     );
     const timer = setInterval(flush, FLUSH_INTERVAL_MS);
+
+    // Paired with the GPS subscription rather than the end/cancel handlers, so
+    // that every way out of a running task — ending it, cancelling it, or the
+    // screen being torn down — takes the notification with it. Hooking it to
+    // the handlers alone would strand a live notification whenever the task
+    // ended by some path nobody thought of.
+    startTracking(task?.title ?? task?.description ?? null);
+
     return () => {
       unsubscribe();
       clearInterval(timer);
+      stopTracking();
     };
-  }, [task?.status, flush]);
+  }, [task?.status, task?.title, task?.description, flush]);
 
   const handleEnd = async () => {
     setBusy(true);
@@ -282,7 +325,11 @@ const ActiveTaskScreen: React.FC = () => {
           <View style={styles.statsRow}>
             <View style={styles.stat}>
               <Text style={styles.statValue}>
-                {formatDistance(task.distanceMeters)}
+                {formatDistance(
+                  // A finished task has the server's figure; a running one has
+                  // only what this device has measured so far.
+                  task.status === 'IN_PROGRESS' ? liveMeters : task.distanceMeters,
+                )}
               </Text>
               <Text style={styles.statCaps}>Distance</Text>
             </View>
@@ -295,9 +342,16 @@ const ActiveTaskScreen: React.FC = () => {
 
           <Text style={styles.trackingNote}>
             {gpsOk
-              ? `Location tracked · ${pointsSent} point${
-                  pointsSent === 1 ? '' : 's'
-                } recorded`
+              ? `Location tracked · ${pointsSeen} point${
+                  pointsSeen === 1 ? '' : 's'
+                }${
+                  // Distinguish "recorded on this phone" from "safely on the
+                  // server". They diverge whenever the network is down, and the
+                  // old text claimed the latter while showing the former.
+                  pointsSent < pointsSeen
+                    ? ` · ${pointsSeen - pointsSent} waiting to upload`
+                    : ' recorded'
+                }`
               : 'Acquiring GPS signal…'}
           </Text>
         </Card>

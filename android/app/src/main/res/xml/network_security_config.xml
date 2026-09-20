@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext (plain HTTP) is allowed ONLY to the OB Track API server.
+  Everything else stays HTTPS-only, so this does not weaken the app's
+  security posture beyond the one host it must reach. Remove this and switch
+  the base URL to https:// once the server has a TLS certificate.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">13.205.21.213</domain>
+    </domain-config>
+</network-security-config>

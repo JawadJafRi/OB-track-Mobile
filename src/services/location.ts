@@ -15,6 +15,33 @@ import { uuidv4 } from '../utils/uuid';
 
 export class LocationError extends Error {}
 
+/**
+ * Great-circle distance between two fixes, in metres.
+ *
+ * Mirrors the formula the server uses to compute a task's authoritative
+ * distance from its uploaded points, so the live read-out on the active-task
+ * screen and the figure that lands in the ledger agree rather than telling the
+ * office boy two different stories about the same walk.
+ */
+export function haversineMeters(
+  from: { latitude: number; longitude: number },
+  to: { latitude: number; longitude: number },
+): number {
+  const EARTH_RADIUS_M = 6371000;
+  const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
+
+  const deltaLat = toRadians(to.latitude - from.latitude);
+  const deltaLon = toRadians(to.longitude - from.longitude);
+  const lat1 = toRadians(from.latitude);
+  const lat2 = toRadians(to.latitude);
+
+  const a =
+    Math.sin(deltaLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLon / 2) ** 2;
+
+  return 2 * EARTH_RADIUS_M * Math.asin(Math.sqrt(a));
+}
+
 let configured = false;
 
 function configure() {
